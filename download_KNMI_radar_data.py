@@ -17,13 +17,18 @@ I think Charlotte used one of these:
 except that the files I got from there have "rt" in the filename instead of "5m".
 """
 
+import datetime
 import logging
 import os
-from pathlib import Path
 import sys
-from dotenv import load_dotenv
+import tarfile
+import time
+from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3 import Retry
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -32,43 +37,8 @@ logger.setLevel(os.environ.get("LOG_LEVEL", logging.INFO))
 DATAPATH = Path("~/weathergenerator/data").expanduser()
 
 
-class OpenDataAPI:
-    def __init__(self, api_token: str):
-        self.base_url = "https://api.dataplatform.knmi.nl/open-data/v1"
-        self.headers = {"Authorization": api_token}
-
-    def __get_data(self, url, params=None):
-        return requests.get(url, headers=self.headers, params=params).json()
-
-    def list_files(self, dataset_name: str, dataset_version: str, params: dict):
-        return self.__get_data(
-            f"{self.base_url}/datasets/{dataset_name}/versions/{dataset_version}/files",
-            params=params,
-        )
-
-    def get_file_url(self, dataset_name: str, dataset_version: str, file_name: str):
-        return self.__get_data(
-            f"{self.base_url}/datasets/{dataset_name}/versions/{dataset_version}/files/{file_name}/url"
-        )
-
-
-def download_file_from_temporary_download_url(download_url, filename):
-    try:
-        with requests.get(download_url, stream=True) as r:
-            r.raise_for_status()
-            with open(filename, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-    except Exception:
-        logger.exception("Unable to download file using download URL")
-        sys.exit(1)
-
-    logger.info(f"Successfully downloaded dataset file to {filename}")
-
-
 def get_token():
-    """
-    Get the KNMI API token, stored in .env as "KNMI_TOKEN".
+    """Get the KNMI API token, stored in .env as "KNMI_TOKEN".
 
     See https://developer.dataplatform.knmi.nl/open-data-api#token
     """
@@ -83,31 +53,85 @@ def get_token():
     return token
 
 
+class DatasetAPI:
+    def __init__(self, dataset_name, dataset_version):
+        self.base_url = "https://api.dataplatform.knmi.nl/open-data/v1"
+        self.dataset_name = dataset_name
+        self.dataset_version = dataset_version
+
+        self.session = self.__create_session()
+        self.session.headers.update({"Authorization": get_token()})
+
+    def __create_session(self):
+        session = requests.Session()
+
+        retries = Retry(total=5, backoff_factor=0.5)
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+        return session
+
+    def __get_data(self, url, params=None):
+        time.sleep(0.5)  # Avoid hitting rate limits
+        response = self.session.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+
+    def list_files(self, **params):
+        return self.__get_data(
+            f"{self.base_url}/datasets/{self.dataset_name}/versions/{self.dataset_version}/files",
+            params=params,
+        )
+
+    def get_file_url(self, filename: str):
+        response = self.__get_data(
+            f"{self.base_url}/datasets/{self.dataset_name}/versions/{self.dataset_version}/files/{filename}/url"
+        )
+        return response.get("temporaryDownloadUrl")
+
+    def download_file(self, filename: str, path: Path, overwrite=False):
+        if (path / filename).exists() and not overwrite:
+            logger.info(f"File {path / filename} already exists, skipping download.")
+            return
+
+        logger.info(f"Downloading file: {filename}")
+        download_url = self.get_file_url(filename)
+
+        with requests.get(download_url, stream=True) as r:
+            r.raise_for_status()
+            with open(path / filename, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+        logger.info(f"Successfully downloaded dataset file to {path / filename}")
+
+
+def extract_tar(tar_path):
+    with tarfile.open(tar_path, "r") as tar:
+        for member in tar.getmembers():
+            member_path = tar_path.parent / member.name
+            if not member_path.exists():
+                tar.extract(member, path=tar_path.parent)
+                print(f"Extracted: {member.name}")
+            else:
+                print(f"Skipped (already exists): {member.name}")
+
+
 def main():
-    # Key expires 1 July 2025
-    api_key = get_token()
-    dataset_name = "nl_rdr_data_rtcor_5m_tar"
-    dataset_version = "1.0"
+    begin = datetime.date(2024, 1, 1).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    end = datetime.date(2024, 2, 1).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
-    logger.info(f"Fetching recent files of {dataset_name} version {dataset_version}")
-
-    api = OpenDataAPI(api_token=api_key)
-
-    params = {"maxKeys": 10, "orderBy": "created", "sorting": "desc"}
-    response = api.list_files(dataset_name, dataset_version, params)
-    if "error" in response:
-        logger.error(f"Unable to retrieve list of files: {response['error']}")
-        sys.exit(1)
+    api = DatasetAPI(dataset_name="nl_rdr_data_rtcor_5m_tar", dataset_version="1.0")
+    response = api.list_files(maxKeys=31, orderBy="created", begin=begin, end=end)
 
     for file in response["files"]:
         filename = file.get("filename")
-        logger.info(f"Downloading file is: {filename}")
+        api.download_file(filename, DATAPATH)
 
-        # fetch the download url and download the file
-        response = api.get_file_url(dataset_name, dataset_version, filename)
-        download_file_from_temporary_download_url(
-            response["temporaryDownloadUrl"], DATAPATH / filename
-        )
+    # Extract all tar files in the data path
+    for tar_file in Path(DATAPATH).glob("*.tar"):
+        extract_tar(tar_file)
 
 
 if __name__ == "__main__":
