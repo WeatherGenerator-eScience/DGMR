@@ -5,8 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "h5py>=3.14.0",
+    "matplotlib>=3.10.3",
     "python-dotenv>=1.1.1",
     "requests>=2.32.4",
+    "scikit-image>=0.25.2",
+    "tqdm>=4.67.1",
 ]
 
 [dependency-groups]

@@ -19,3 +19,10 @@ to manage dependencies and run in consistent environment.
 ## Environment variables
 
 The KNMI Data Platform (KDP) token should be stored in .env for downloading data.
+
+
+## Download data
+
+```
+uv run download_KNMI_radar_data.py
+uv run preprocess.py
